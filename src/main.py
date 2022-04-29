@@ -184,7 +184,7 @@ def generate_generalization_file(smt2_filepath: str) -> str:
     content = insert_lines_before(content, first_nd_var_decl_match[2],
                                   [p_init_fun_call], first_nd_var_decl_match[1])
 
-    new_smt2_filepath: str = replace_extension(smt2_filepath, '_new.smt2')
+    new_smt2_filepath: str = replace_extension(smt2_filepath, '.smt2')
     with open(new_smt2_filepath, 'w+') as file:
         file.write(content)
 
@@ -404,6 +404,7 @@ def main() -> None:
     features: list[str] = namespace.features
     assumes: list[c_ast.Node] = []
 
+    i: int = 0
     while True:
         file_ast: c_ast.FileAST = parse_file(c_filepath)
         main_func_def: Optional[c_ast.FuncDef] = get_func_def(file_ast, 'main')
@@ -420,11 +421,11 @@ def main() -> None:
         add_feature_decls(features, main_func_def.body)
         add_assumes(assumes, main_func_def.body)
 
-        new_c_filepath: str = replace_extension(c_filepath, '_sea.c')
+        new_c_filepath: str = replace_extension(c_filepath, f'_{i}.c')
         with open(new_c_filepath, 'w+') as file:
             file.write(SEAHORN_INCLUDE + '\n' * 2 + c_generator.CGenerator().visit(file_ast))
 
-        ll_filepath: str = replace_extension(c_filepath, '_cex.ll')
+        ll_filepath: str = replace_extension(new_c_filepath, '.ll')
         process: subprocess.CompletedProcess = run(
             f'{seahorn_path} pf {new_c_filepath} --cex={ll_filepath}')
 
@@ -451,6 +452,8 @@ def main() -> None:
         print('Featured Counter Example:')
         print('\tFeature set:', feature_formula)
         print('\tInput set:', input_formula)
+
+        i += 1
 
 
 if __name__ == '__main__':

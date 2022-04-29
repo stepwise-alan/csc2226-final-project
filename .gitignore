@@ -239,6 +239,7 @@ fabric.properties
 
 
 # csc2226-final-project
+*_*.c
 *.ll
 *.smt2
 *_sea.c

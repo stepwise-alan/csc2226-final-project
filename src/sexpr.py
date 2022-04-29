@@ -58,37 +58,54 @@ def parse_s_expr(s_expr: str) -> Union[Node, str]:
 def parse_s_exprs(s_exprs: str) -> list[Union[Node, str]]:
     stack: list[list[Union[Node, str]]] = []
     current: list[Union[Node, str]] = []
-    for match in re.finditer(r'''(?mx)\s*(?:
-            (?P<left_brace>\()|
-            (?P<right_brace>\))|
-            (?P<true>true)|
-            (?P<false>false)|
-            (?P<integer>-?\d+)|
-            (?P<float>-?\d+\.\d+)|
-            (?P<quoted_string>"[^"]*")|
-            (?P<string>[^(^)\s]+))''', s_exprs):
-        kind, value = [(t, v) for t, v in match.groupdict().items() if v][0]
+    line_num: int = 1
+    line_start: int = 0
+    for match in re.finditer(rf'''(?x)(?:
+            (?P<LEFT_BRACE>\()|
+            (?P<RIGHT_BRACE>\))|
+            (?P<BOOLEAN>true|false)|
+            (?P<INTEGER>-?\d+)|
+            (?P<FLOAT>-?\d+\.\d+)|
+            (?P<QUOTED_STRING>"[^"]*")|
+            (?P<STRING>[^()\s]+)|
+            (?P<NEWLINE>\n)|
+            (?P<SKIP>\s+)|
+            (?P<MISMATCH>.)
+            )''', s_exprs):
+        kind: str = match.lastgroup
+        value: str = match.group()
+        column: int = match.start() - line_start
         match kind:
-            case 'left_brace':
+            case 'LEFT_BRACE':
                 stack.append(current)
                 current = []
-            case 'right_brace':
+            case 'RIGHT_BRACE':
                 assert stack, "unmatched right brace"
                 node: Node = Node(current)
                 current = stack.pop()
                 current.append(node)
-            case 'true' | 'false':
+            case 'BOOLEAN':
                 current.append(value)
-            case 'integer':
+            case 'INTEGER':
                 current.append(value)
-            case 'float':
+            case 'FLOAT':
                 current.append(value)
-            case 'quoted_string':
+            case 'QUOTED_STRING':
                 current.append(value)
-            case 'string':
+            case 'STRING':
                 current.append(value)
+            case 'NEWLINE':
+                line_start = match.end()
+                line_num += 1
+                continue
+            case 'SKIP':
+                continue
+            case 'MISMATCH':
+                raise RuntimeError(f'{value!r} unexpected '
+                                   f'on line {line_num} column {column}')
             case _:
-                assert False, f"unknown value {value} has unknown kind {kind}"
+                raise RuntimeError(f"{value!r} has unknown kind {kind!r} "
+                                   f"on line {line_num} column{column}")
     assert not stack, "unmatched left brace"
-    assert current, "no s exprs found"
+    assert current, "no s-expressions found"
     return current

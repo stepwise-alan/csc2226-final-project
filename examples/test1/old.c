@@ -1,33 +1,37 @@
-// Summary: (FA) && (a != b)
-int lib(int a, int b) {
+// FA: (x != y)
+int lib(int x, int y) {
     int result = 0;
     if (FA) {
-        result += a; // result += b;
+      result += x;
+//    result += y;
     } else {
-        result += b;
+        result += y;
     }
     if (FB) {
-        result += a;
+        result += x;
     } else {
-        result += b;
+        result += y;
     }
     if (FC) {
-        result += a;
+        result += x;
     } else {
-        result += b;
+        result += y;
     }
     return result;
 }
 
-int client(int a, int b) {
-    // Summary:
-    // (FA && !FB) && (a + 1 != b)
+int client(int x, int y) {
+    // FA and !FB: x + 1 != y
     if (FA) {
+        // FA and !FB: x + 1 != y
         if (FB) {
-            return lib(b, b);
+            return lib(y, y);
+        } else {
+            // !FA: x + 1 != y
+            return lib(x + 1, y);
         }
-        return lib(a + 1, b);
     } else {
-        return lib(a, b);
+        // !FA: x != y
+        return lib(x, y);
     }
 }
