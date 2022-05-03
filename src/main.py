@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 
 import argparse
+import ntpath
 import os
 import re
 import shlex
 import subprocess
+import tempfile
 from re import Match
-from typing import Optional, AnyStr, Container, Iterable, Iterator
+from typing import Optional, AnyStr, Container, Iterable, Iterator, Generator
 
 import pycparser
 import pycparser_fake_libc
@@ -83,8 +85,12 @@ class FeatureAdder(c_ast.NodeVisitor):
         self.generic_visit(node)
 
 
+def remove_extension(path: str) -> str:
+    return os.path.splitext(path)[0]
+
+
 def replace_extension(path: str, suffix: str) -> str:
-    return os.path.splitext(path)[0] + suffix
+    return remove_extension(path) + suffix
 
 
 def insert_lines_before(text: str, before: str, insert_lines: list[str],
@@ -304,21 +310,22 @@ def get_namespace() -> argparse.Namespace:
         description="A variability-aware model checker "
                     "using SeaHorn as the backend engine.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("infile", help="C source code file to be checked",
+    parser.add_argument("infile", help="Path to the C file to be checked",
                         type=extant_file, metavar="FILE")
-    parser.add_argument("--features", help="feature variables", nargs='*',
-                        required=True)
-    parser.add_argument("--cpp", help="C Preprocessor path",
+    parser.add_argument("--features", help="Specify the feature variables",
+                        nargs='*', required=True)
+    parser.add_argument("--cpp", help="Path to C Preprocessor",
                         metavar='PATH', default=cpp_path)
-    parser.add_argument("--sea", help="SeaHorn path",
+    parser.add_argument("--sea", help="Path to SeaHorn",
                         metavar='PATH', default=seahorn_path)
-    parser.add_argument("--z3", help="Z3 path",
+    parser.add_argument("--z3", help="Path to Z3",
                         metavar='PATH', default=z3_path)
-    parser.add_argument("--timeout", help="timeout in seconds",
+    parser.add_argument("--timeout", help="Set the timeout in seconds",
                         metavar='SECONDS', type=int, default=timeout)
-    parser.add_argument("--wsl", help="enable if using Windows Subsystem "
+    parser.add_argument("--wsl", help="Enable if using Windows Subsystem "
                                       "for Linux (WSL)",
                         action='store_true')
+    parser.add_argument("--out", help="Path to the output directory")
     return parser.parse_args()
 
 
@@ -480,15 +487,27 @@ def generate_c_code(node: c_ast.Node) -> str:
     return c_generator.CGenerator().visit(node)
 
 
-def main() -> None:
-    namespace: argparse.Namespace = get_namespace()
-    update_globals(namespace)
+def basename(path: str):
+    head, tail = ntpath.split(path)
+    return tail or ntpath.basename(head)
 
-    c_filepath: str = namespace.infile
+
+def normalize_path(path: str) -> str:
+    return path.replace('\\', '/')
+
+
+def get_results(c_filepath: str, features: list[str], out_dir_path: str,
+                print_enabled: bool = False) -> list[tuple[FNode, FNode]]:
+    out_c_filepath_prefix: str = os.path.join(
+        out_dir_path, remove_extension(basename(c_filepath)))
     if wsl:
-        c_filepath = c_filepath.replace('\\', '/')
-    features: list[str] = namespace.features
+        c_filepath = normalize_path(
+            os.path.relpath(c_filepath))
+        out_c_filepath_prefix = normalize_path(
+            os.path.relpath(out_c_filepath_prefix))
+
     assumes: list[c_ast.Node] = []
+    featured_counter_examples: list[tuple[FNode, FNode]] = []
 
     i: int = 0
     while True:
@@ -507,19 +526,19 @@ def main() -> None:
         add_feature_decls(features, main_func_def.body)
         add_assumes(assumes, main_func_def.body)
 
-        new_c_filepath: str = replace_extension(c_filepath, f'_{i}.c')
-        with open(new_c_filepath, 'w+') as file:
+        out_c_filepath: str = f'{out_c_filepath_prefix}_{i}.c'
+        with open(out_c_filepath, 'w+') as file:
             file.write(SEAHORN_INCLUDE + '\n' * 2 + generate_c_code(file_ast))
 
-        ll_filepath: str = replace_extension(new_c_filepath, '.ll')
+        ll_filepath: str = replace_extension(out_c_filepath, '.ll')
         process: subprocess.CompletedProcess = run(
-            f'{seahorn_path} pf {new_c_filepath} --cex={ll_filepath}')
+            f'{seahorn_path} pf {out_c_filepath} --cex={ll_filepath}')
 
         if not has_seahorn_returned_sat(process):
             print("No more all counter examples.")
             break
 
-        smt2_filepath: str = generate_smt2_file(new_c_filepath)
+        smt2_filepath: str = generate_smt2_file(out_c_filepath)
         new_smt2_filepath: str = generate_generalization_file(smt2_filepath)
         log_filepath: str = generate_log_file(new_smt2_filepath)
         s_expr: str = get_precondition_in_s_expr(log_filepath)
@@ -534,13 +553,33 @@ def main() -> None:
         feature_formula, input_formula = split_formula(formula, features)
         feature_c_ast: c_ast.Node = get_feature_c_ast(feature_formula)
         assumes.append(c_func_call('assume', [c_neg(feature_c_ast)]))
+        featured_counter_examples.append((feature_formula, input_formula))
 
-        print(f"Featured Counter Example {i + 1}")
-        print("\tFeatures:", "\t", generate_c_code(feature_c_ast))
-        print("\tInputs:  ", "\t", input_formula.serialize())
-        print("")
+        if print_enabled:
+            print(f"Featured Counter Example {i}")
+            print("\tFeatures:", "\t", generate_c_code(feature_c_ast))
+            print("\tInputs:  ", "\t", input_formula.serialize())
+            print("")
 
         i += 1
+
+    return featured_counter_examples
+
+
+def main() -> None:
+    namespace: argparse.Namespace = get_namespace()
+    update_globals(namespace)
+
+    c_filepath: str = namespace.infile
+    features: list[str] = namespace.features
+
+    out_dir_path: str = namespace.out
+    if out_dir_path is not None:
+        os.makedirs(out_dir_path, exist_ok=True)
+        get_results(c_filepath, features, out_dir_path, True)
+    else:
+        with tempfile.TemporaryDirectory() as out_dir_path:
+            get_results(c_filepath, features, out_dir_path, True)
 
 
 if __name__ == '__main__':
