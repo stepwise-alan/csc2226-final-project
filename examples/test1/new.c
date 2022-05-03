@@ -1,18 +1,18 @@
-// FA: (x != y)
+// A: (x != y)
 int lib(int x, int y) {
     int result = 0;
-    if (FA) {
+    if (A) {
 //      result += x;
         result += y;
     } else {
         result += y;
     }
-    if (FB) {
+    if (B) {
         result += x;
     } else {
         result += y;
     }
-    if (FC) {
+    if (C) {
         result += x;
     } else {
         result += y;
@@ -21,17 +21,17 @@ int lib(int x, int y) {
 }
 
 int client(int x, int y) {
-    // FA and !FB: x + 1 != y
-    if (FA) {
-        // FA and !FB: x + 1 != y
-        if (FB) {
+    // A and !B: x + 1 != y
+    if (A) {
+        // A and !B: x + 1 != y
+        if (B) {
             return lib(y, y);
         } else {
-            // !FA: x + 1 != y
+            // !A: x + 1 != y
             return lib(x + 1, y);
         }
     } else {
-        // !FA: x != y
+        // !A: x != y
         return lib(x, y);
     }
 }

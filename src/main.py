@@ -15,7 +15,8 @@ from pycparser import c_ast, c_generator
 from pysmt.fnode import FNode
 from pysmt.typing import INT
 
-from c_utils import c_int_decl, c_id, c_func_call, parse_c_expr, c_neg
+from c_utils import c_int_decl, c_id, c_func_call, parse_c_expr, \
+    c_neg, c_equal, c_not_equal, c_and
 from simplify import get_simplified_formula, formula_to_c_expr
 from smt2_utils import smt2_and, smt2_fun_call, smt2_declare_fun, \
     smt2_forall, smt2_assert, smt2_implies, SMT2_BOOL, SMT2_TRUE
@@ -129,7 +130,8 @@ def get_precondition_in_s_expr(log_filepath: str) -> str:
 
 def generate_smt2_file(new_c_filepath: str) -> str:
     smt2_filepath: str = replace_extension(new_c_filepath, '.smt2')
-    run(f"{seahorn_path} smt --horn-format=pure-smt2 {new_c_filepath} -o {smt2_filepath}")
+    run(f"{seahorn_path} smt --horn-format=pure-smt2 "
+        f"{new_c_filepath} -o {smt2_filepath}")
     return smt2_filepath
 
 
@@ -217,7 +219,8 @@ def add_assumes(assumes: list[c_ast.Node], body: c_ast.Compound):
         if isinstance(node, c_ast.FuncCall):
             # TODO
             # if node.name.name == 'assert':
-            body.block_items = body.block_items[:i] + assumes + body.block_items[i:]
+            body.block_items = body.block_items[:i] + assumes \
+                               + body.block_items[i:]
             return
 
 
@@ -298,15 +301,23 @@ def extant_file(x: str) -> str:
 
 def get_namespace() -> argparse.Namespace:
     parser: argparse.ArgumentParser = argparse.ArgumentParser(
-        description="A variability-aware model checker using SeaHorn as the backend engine.",
+        description="A variability-aware model checker "
+                    "using SeaHorn as the backend engine.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("infile", help="C source code file to be checked", type=extant_file, metavar="FILE")
-    parser.add_argument("--features", help="feature variables", nargs='*', required=True)
-    parser.add_argument("--cpp", help="C Preprocessor path", metavar='PATH', default=cpp_path)
-    parser.add_argument("--sea", help="SeaHorn path", metavar='PATH', default=seahorn_path)
-    parser.add_argument("--z3", help="Z3 path", metavar='PATH', default=z3_path)
-    parser.add_argument("--timeout", help="timeout in seconds", metavar='SECONDS', type=int, default=timeout)
-    parser.add_argument("--wsl", help="enable if using Windows Subsystem for Linux (WSL)",
+    parser.add_argument("infile", help="C source code file to be checked",
+                        type=extant_file, metavar="FILE")
+    parser.add_argument("--features", help="feature variables", nargs='*',
+                        required=True)
+    parser.add_argument("--cpp", help="C Preprocessor path",
+                        metavar='PATH', default=cpp_path)
+    parser.add_argument("--sea", help="SeaHorn path",
+                        metavar='PATH', default=seahorn_path)
+    parser.add_argument("--z3", help="Z3 path",
+                        metavar='PATH', default=z3_path)
+    parser.add_argument("--timeout", help="timeout in seconds",
+                        metavar='SECONDS', type=int, default=timeout)
+    parser.add_argument("--wsl", help="enable if using Windows Subsystem "
+                                      "for Linux (WSL)",
                         action='store_true')
     return parser.parse_args()
 
@@ -358,19 +369,27 @@ def get_subs(mapping: dict[str, str]) -> dict[FNode, FNode]:
     return subs
 
 
-def get_feature_formula(formula: FNode, features: list[str]) -> tuple[FNode, FNode]:
+def require_conjunction(formula: FNode) -> None:
     assert formula.is_and(), "formula is not in the conjunction form"
-    args: list[FNode] = formula.args()
+
+
+def get_conjuncts(formula: FNode) -> list[FNode]:
+    require_conjunction(formula)
+    return formula.args()
+
+
+def split_formula(formula: FNode, features: list[str]
+                  ) -> tuple[FNode, FNode]:
     feature_formulas: list[FNode] = []
     input_formulas: list[FNode] = []
-    for arg in args:
-        free_variables: list[FNode] = arg.get_free_variables()
+    for conjunct in get_conjuncts(formula):
+        free_variables: list[FNode] = conjunct.get_free_variables()
         for v in free_variables:
             if str(v) not in features:
-                input_formulas.append(arg)
+                input_formulas.append(conjunct)
                 break
         else:
-            feature_formulas.append(arg)
+            feature_formulas.append(conjunct)
     return pysmt.shortcuts.And(feature_formulas), pysmt.shortcuts.And(input_formulas)
 
 
@@ -378,20 +397,87 @@ def simplify_feature_formula(feature_formula: FNode) -> FNode:
     free_variables: list[FNode] = feature_formula.get_free_variables()
     formulas: list[FNode] = []
     for v in free_variables:
-        v_is_zero: FNode = pysmt.shortcuts.Equals(v, pysmt.shortcuts.Int(0))
+        v_is_zero: FNode = pysmt.shortcuts.Equals(
+            v, pysmt.shortcuts.Int(0))
+
         if pysmt.shortcuts.is_valid(pysmt.shortcuts.Implies(
                 feature_formula, v_is_zero)):
             formulas.append(v_is_zero)
             continue
-        v_is_not_zero: FNode = pysmt.shortcuts.NotEquals(v, pysmt.shortcuts.Int(0))
+
+        v_is_not_zero: FNode = pysmt.shortcuts.NotEquals(
+            v, pysmt.shortcuts.Int(0))
+
         if pysmt.shortcuts.is_valid(pysmt.shortcuts.Implies(
                 feature_formula, v_is_not_zero)):
             formulas.append(v_is_not_zero)
     return pysmt.shortcuts.And(formulas)
 
 
-def get_feature_c_expr(feature_formula: FNode) -> c_ast.Node:
-    return parse_c_expr(formula_to_c_expr(feature_formula))
+def formula_to_c_ast(formula: FNode) -> c_ast.Node:
+    return parse_c_expr(formula_to_c_expr(formula))
+
+
+def bool_formula_to_c_ast(formula: FNode, neg: bool = False) -> Optional[c_ast.Node]:
+    left: FNode
+    right: FNode
+    if formula.is_equals():
+        left, right = formula.args()
+        if left.is_symbol():
+            if right.is_constant():
+                value: int = right.constant_value()
+                if value == 0:
+                    return c_id(left.symbol_name(), not neg)
+                else:
+                    return c_id(left.symbol_name(), neg)
+            elif right.is_symbol():
+                if neg:
+                    return c_equal(c_id(left.symbol_name()), c_id(right.symbol_name()))
+                else:
+                    return c_not_equal(c_id(left.symbol_name()), c_id(right.symbol_name()))
+        elif right.is_symbol():
+            if left.is_constant():
+                value: int = left.constant_value()
+                if value == 0:
+                    return c_id(right.symbol_name(), not neg)
+                else:
+                    return c_id(right.symbol_name(), neg)
+    elif formula.is_lt():
+        left, right = formula.args()
+        if right.is_symbol():
+            if left.is_constant() and left.constant_value() >= 0:
+                return c_id(right.symbol_name(), neg)
+        elif left.is_symbol():
+            if right.is_constant() and right.constant_value() <= 0:
+                return c_id(right.symbol_name(), neg)
+    elif formula.is_le():
+        left, right = formula.args()
+        if right.is_symbol():
+            if left.is_constant() and left.constant_value() > 0:
+                return c_id(right.symbol_name(), neg)
+        elif left.is_symbol():
+            if right.is_constant() and right.constant_value() < 0:
+                return c_id(right.symbol_name(), neg)
+    elif formula.is_not():
+        return bool_formula_to_c_ast(formula.arg(0), not neg)
+    return None
+
+
+def get_feature_c_ast(feature_formula: FNode) -> c_ast.Node:
+    result: Optional[c_ast.Node] = None
+    for conjunct in get_conjuncts(feature_formula):
+        c_conjunct: Optional[c_ast.Node] = bool_formula_to_c_ast(conjunct)
+        if c_conjunct is None:
+            return formula_to_c_ast(feature_formula)
+        if result is None:
+            result = c_conjunct
+        else:
+            result = c_and(result, c_conjunct)
+    return result
+
+
+def generate_c_code(node: c_ast.Node) -> str:
+    return c_generator.CGenerator().visit(node)
 
 
 def main() -> None:
@@ -423,7 +509,7 @@ def main() -> None:
 
         new_c_filepath: str = replace_extension(c_filepath, f'_{i}.c')
         with open(new_c_filepath, 'w+') as file:
-            file.write(SEAHORN_INCLUDE + '\n' * 2 + c_generator.CGenerator().visit(file_ast))
+            file.write(SEAHORN_INCLUDE + '\n' * 2 + generate_c_code(file_ast))
 
         ll_filepath: str = replace_extension(new_c_filepath, '.ll')
         process: subprocess.CompletedProcess = run(
@@ -445,13 +531,14 @@ def main() -> None:
 
         feature_formula: FNode
         input_formula: FNode
-        feature_formula, input_formula = get_feature_formula(formula, features)
-        feature_formula = simplify_feature_formula(feature_formula)
-        assumes.append(c_func_call('assume', [c_neg(get_feature_c_expr(feature_formula))]))
+        feature_formula, input_formula = split_formula(formula, features)
+        feature_c_ast: c_ast.Node = get_feature_c_ast(feature_formula)
+        assumes.append(c_func_call('assume', [c_neg(feature_c_ast)]))
 
-        print('Featured Counter Example:')
-        print('\tFeature set:', feature_formula)
-        print('\tInput set:', input_formula)
+        print(f"Featured Counter Example {i + 1}")
+        print("\tFeatures:", "\t", generate_c_code(feature_c_ast))
+        print("\tInputs:  ", "\t", input_formula.serialize())
+        print("")
 
         i += 1
 
