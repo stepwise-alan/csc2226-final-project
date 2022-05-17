@@ -3,7 +3,6 @@ from typing import Optional, Iterable
 
 from pysmt.fnode import FNode
 from pysmt.shortcuts import *
-from pysmt.shortcuts import serialize
 from pysmt.smtlib.parser import get_formula
 
 from smt2_utils import smt2_assert, SMT2_INT, smt2_declare_const

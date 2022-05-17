@@ -25,11 +25,11 @@ class Node:
     def _c_op(op: str) -> str:
         match op:
             case 'and':
-                return '&&'
+                return ' && '
             case 'or':
-                return '||'
+                return ' || '
             case _:
-                return op
+                return ' ' + op + ' '
 
     def c_expr(self) -> str:
         match self.children:
@@ -44,9 +44,11 @@ class Node:
             case ['xor', arg0, arg1]:
                 return f'(!{to_c_expr(arg0)} != !{to_c_expr(arg1)})'
             case ['ite', arg0, arg1, arg2]:
-                return f'({to_c_expr(arg0)} ? {to_c_expr(arg1)} : {to_c_expr(arg2)})'
+                return f'({to_c_expr(arg0)} ? ' \
+                       f'{to_c_expr(arg1)} : {to_c_expr(arg2)})'
             case [op, *args]:
-                return '(' + to_c_expr(op).join(to_c_expr(arg) for arg in args) + ')'
+                return '(' + self._c_op(op).join(
+                    to_c_expr(arg) for arg in args) + ')'
 
 
 def parse_s_expr(s_expr: str) -> Union[Node, str]:

@@ -6,9 +6,10 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 from re import Match
-from typing import Optional, AnyStr, Container, Iterable, Iterator, Generator
+from typing import Optional, AnyStr, Container, Iterable, Iterator
 
 import pycparser
 import pycparser_fake_libc
@@ -17,8 +18,8 @@ from pycparser import c_ast, c_generator
 from pysmt.fnode import FNode
 from pysmt.typing import INT
 
-from c_utils import c_int_decl, c_id, c_func_call, parse_c_expr, \
-    c_neg, c_equal, c_not_equal, c_and
+from c_utils import c_id, parse_c_expr, c_neg, c_equal, c_not_equal, c_and, \
+    c_assume, c_nd_int, ASSUME_FUNCTION_NAME, c_int_decl
 from simplify import get_simplified_formula, formula_to_c_expr
 from smt2_utils import smt2_and, smt2_fun_call, smt2_declare_fun, \
     smt2_forall, smt2_assert, smt2_implies, SMT2_BOOL, SMT2_TRUE
@@ -27,27 +28,26 @@ cpp_path: str = 'cpp'
 seahorn_path: str = 'sea'
 z3_path: str = 'z3'
 timeout: int = 500
-wsl: bool = False
+use_normalized_path: bool = False
 
 SEAHORN_SAT: str = 'sat'
 SEAHORN_UNSAT: str = 'unsat'
 
-SEAHORN_INCLUDE: str = '''extern void __VERIFIER_assume (int);
-extern void __VERIFIER_error ();
-__attribute__((__noreturn__)) extern void __VERIFIER_error (void);
-#define assert(X) if(!(X)){__VERIFIER_error ();}
-#define assume __VERIFIER_assume
-extern int nd();
+SEAHORN_INCLUDE: str = f'''
+extern void __VERIFIER_error (void);
+extern void __VERIFIER_assume (int);
+#define {ASSUME_FUNCTION_NAME} __VERIFIER_assume
+#define assert(X) (void)((X) || (__VERIFIER_error (), 0))
 '''
 
 P_INIT_FUNCTION_NAME: str = 'p_init'
 TARGET_FUNCTION_NAME: str = 'target'
-ND_FUNCTION_NAME: str = 'nd'
 
 
 def parse_file(path: str) -> c_ast.FileAST:
     return pycparser.parse_file(
-        path, use_cpp=True, cpp_path=cpp_path,
+        filename=normalize_path(path),
+        use_cpp=True, cpp_path=cpp_path,
         cpp_args=['-I', pycparser_fake_libc.directory])
 
 
@@ -55,9 +55,9 @@ class InputInitializer(c_ast.NodeVisitor):
     def __init__(self):
         self.inputs: list[str] = []
 
-    def visit_Decl(self, node: c_ast.Decl):
+    def visit_Decl(self, node: c_ast.Decl) -> None:
         if not node.init:
-            node.init = c_func_call(ND_FUNCTION_NAME)
+            node.init = c_nd_int()
             self.inputs.append(node.name)
 
 
@@ -89,10 +89,6 @@ def remove_extension(path: str) -> str:
     return os.path.splitext(path)[0]
 
 
-def replace_extension(path: str, suffix: str) -> str:
-    return remove_extension(path) + suffix
-
-
 def insert_lines_before(text: str, before: str, insert_lines: list[str],
                         prefix: str, count: int = -1) -> str:
     return text.replace(prefix + before,
@@ -106,12 +102,9 @@ def run(command: str) -> subprocess.CompletedProcess:
             shlex.split(command), capture_output=True,
             universal_newlines=True, timeout=timeout, check=True)
     except subprocess.CalledProcessError as e:
-        print("COMMAND FAILED ".ljust(80, '='))
         print(command)
-        print("STDOUT ".ljust(80, '='))
         print(e.stdout)
-        print("STDERR ".ljust(80, '='))
-        print(e.stderr)
+        print(e.stderr, file=sys.stderr)
         exit(e.returncode)
 
 
@@ -134,14 +127,7 @@ def get_precondition_in_s_expr(log_filepath: str) -> str:
     return ''
 
 
-def generate_smt2_file(new_c_filepath: str) -> str:
-    smt2_filepath: str = replace_extension(new_c_filepath, '.smt2')
-    run(f"{seahorn_path} smt --horn-format=pure-smt2 "
-        f"{new_c_filepath} -o {smt2_filepath}")
-    return smt2_filepath
-
-
-def generate_generalization_file(smt2_filepath: str) -> str:
+def generate_new_smt2_file(smt2_filepath: str, new_smt2_filepath: str) -> None:
     with open(smt2_filepath) as file:
         content: str = file.read()
 
@@ -185,27 +171,23 @@ def generate_generalization_file(smt2_filepath: str) -> str:
         r'\))', content)
 
     assert first_assert_match, "no asserts in smt2 file"
-    assert first_nd_var_decl_match, "no variables initialized to nd in smt2 file"
+    assert first_nd_var_decl_match, \
+        "no variables initialized to nd in smt2 file"
 
     content = insert_lines_before(content, first_assert_match[2],
                                   new_lines, first_assert_match[1], 1)
     content = insert_lines_before(content, first_nd_var_decl_match[2],
                                   [p_init_fun_call], first_nd_var_decl_match[1])
 
-    new_smt2_filepath: str = replace_extension(smt2_filepath, '.smt2')
     with open(new_smt2_filepath, 'w+') as file:
         file.write(content)
 
-    return new_smt2_filepath
 
-
-def generate_log_file(new_smt2_filepath: str) -> str:
-    log_filepath: str = replace_extension(new_smt2_filepath, '.log')
+def generate_log_file(new_smt2_filepath: str, log_filepath: str) -> None:
     run(f"{z3_path} proof=true fp.engine=spacer fp.spacer.order_children=2 "
         f"fp.xform.subsumption_checker=false fp.xform.inline_eager=false "
         f"fp.xform.inline_linear=false fp.spacer.trace_file={log_filepath} "
         f"-v:2 {new_smt2_filepath}")
-    return log_filepath
 
 
 def replace_p_init_variables(s_expr: str, variables: list[str]) -> str:
@@ -220,7 +202,7 @@ def replace_p_init_variables(s_expr: str, variables: list[str]) -> str:
     return s_expr
 
 
-def add_assumes(assumes: list[c_ast.Node], body: c_ast.Compound):
+def add_assumes(assumes: list[c_ast.Node], body: c_ast.Compound) -> None:
     for i, node in enumerate(body.block_items):
         if isinstance(node, c_ast.FuncCall):
             # TODO
@@ -230,9 +212,9 @@ def add_assumes(assumes: list[c_ast.Node], body: c_ast.Compound):
             return
 
 
-def add_feature_decls(features: list[str], body: c_ast.Compound):
-    body.block_items = [c_int_decl(f, c_func_call(ND_FUNCTION_NAME))
-                        for f in features] + body.block_items
+def add_feature_decls(features: list[str], body: c_ast.Compound) -> None:
+    decls: list[c_ast.Node] = [c_int_decl(f, c_nd_int()) for f in features]
+    body.block_items = decls + body.block_items
 
 
 def get_cex_tuple_name(lines: list[AnyStr]) -> Optional[str]:
@@ -251,7 +233,7 @@ def get_cex_tuple_name(lines: list[AnyStr]) -> Optional[str]:
     return None
 
 
-def get_cex(ll_filepath: str, variables: list[str]):
+def get_cex(ll_filepath: str, variables: list[str]) -> dict[str, str]:
     cex: dict[str, str] = {}
 
     with open(ll_filepath) as file:
@@ -267,7 +249,8 @@ def get_cex(ll_filepath: str, variables: list[str]):
             break
 
     if cex_line:
-        match: Optional[Match[AnyStr]] = re.search(r'\[.*]\s*\[(.*)].*', cex_line)
+        match: Optional[Match[AnyStr]] = re.search(
+            r'\[.*]\s*\[(.*)].*', cex_line)
         if match:
             cex_values: list[str] = match.group(1).split(',')
             if len(cex_values) >= len(variables):
@@ -310,32 +293,32 @@ def get_namespace() -> argparse.Namespace:
         description="A variability-aware model checker "
                     "using SeaHorn as the backend engine.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("infile", help="Path to the C file to be checked",
-                        type=extant_file, metavar="FILE")
+    parser.add_argument("path", help="Path to the C file to be checked",
+                        metavar="FILE", type=extant_file)
     parser.add_argument("--features", help="Specify the feature variables",
                         nargs='*', required=True)
     parser.add_argument("--cpp", help="Path to C Preprocessor",
-                        metavar='PATH', default=cpp_path)
+                        metavar="PATH", default=cpp_path)
     parser.add_argument("--sea", help="Path to SeaHorn",
-                        metavar='PATH', default=seahorn_path)
+                        metavar="PATH", default=seahorn_path)
     parser.add_argument("--z3", help="Path to Z3",
-                        metavar='PATH', default=z3_path)
+                        metavar="PATH", default=z3_path)
     parser.add_argument("--timeout", help="Set the timeout in seconds",
-                        metavar='SECONDS', type=int, default=timeout)
-    parser.add_argument("--wsl", help="Enable if using Windows Subsystem "
-                                      "for Linux (WSL)",
-                        action='store_true')
+                        metavar='SECONDS', default=timeout, type=int)
+    parser.add_argument("--normalize-path",
+                        help="Enable if filepaths should be normalized",
+                        action=f'store_{not use_normalized_path}'.lower())
     parser.add_argument("--out", help="Path to the output directory")
     return parser.parse_args()
 
 
 def update_globals(namespace: argparse.Namespace) -> None:
-    global cpp_path, seahorn_path, z3_path, timeout, wsl
+    global cpp_path, seahorn_path, z3_path, timeout, use_normalized_path
     cpp_path = namespace.cpp
     seahorn_path = namespace.sea
     z3_path = namespace.z3
     timeout = namespace.timeout
-    wsl = namespace.wsl
+    use_normalized_path = namespace.normalize_path
 
 
 def has_seahorn_returned_sat(process: subprocess.CompletedProcess) -> bool:
@@ -357,7 +340,8 @@ def get_all_function_names(file_ast: c_ast.FileAST) -> set[str]:
     return function_names
 
 
-def get_p_init_variable_mapping(s_expr: str, variables: list[str]):
+def get_p_init_variable_mapping(s_expr: str, variables: list[str]
+                                ) -> dict[str, str]:
     matches: Iterator[Match[AnyStr]] = re.finditer(
         rf'({P_INIT_FUNCTION_NAME}_(\d+)_[^\s()]*)', s_expr)
     mapping: dict[str, str] = {}
@@ -387,17 +371,20 @@ def get_conjuncts(formula: FNode) -> list[FNode]:
 
 def split_formula(formula: FNode, features: list[str]
                   ) -> tuple[FNode, FNode]:
-    feature_formulas: list[FNode] = []
-    input_formulas: list[FNode] = []
+    feature_conjuncts: list[FNode] = []
+    input_conjuncts: list[FNode] = []
     for conjunct in get_conjuncts(formula):
         free_variables: list[FNode] = conjunct.get_free_variables()
         for v in free_variables:
             if str(v) not in features:
-                input_formulas.append(conjunct)
+                input_conjuncts.append(conjunct)
                 break
         else:
-            feature_formulas.append(conjunct)
-    return pysmt.shortcuts.And(feature_formulas), pysmt.shortcuts.And(input_formulas)
+            feature_conjuncts.append(conjunct)
+
+    feature_formula: FNode = pysmt.shortcuts.And(feature_conjuncts)
+    input_formula: FNode = pysmt.shortcuts.And(input_conjuncts)
+    return feature_formula, input_formula
 
 
 def simplify_feature_formula(feature_formula: FNode) -> FNode:
@@ -425,7 +412,8 @@ def formula_to_c_ast(formula: FNode) -> c_ast.Node:
     return parse_c_expr(formula_to_c_expr(formula))
 
 
-def bool_formula_to_c_ast(formula: FNode, neg: bool = False) -> Optional[c_ast.Node]:
+def bool_formula_to_c_ast(formula: FNode, neg: bool = False
+                          ) -> Optional[c_ast.Node]:
     left: FNode
     right: FNode
     if formula.is_equals():
@@ -439,9 +427,11 @@ def bool_formula_to_c_ast(formula: FNode, neg: bool = False) -> Optional[c_ast.N
                     return c_id(left.symbol_name(), neg)
             elif right.is_symbol():
                 if neg:
-                    return c_equal(c_id(left.symbol_name()), c_id(right.symbol_name()))
+                    return c_not_equal(c_id(left.symbol_name()),
+                                       c_id(right.symbol_name()))
                 else:
-                    return c_not_equal(c_id(left.symbol_name()), c_id(right.symbol_name()))
+                    return c_equal(c_id(left.symbol_name()),
+                                   c_id(right.symbol_name()))
         elif right.is_symbol():
             if left.is_constant():
                 value: int = left.constant_value()
@@ -487,72 +477,74 @@ def generate_c_code(node: c_ast.Node) -> str:
     return c_generator.CGenerator().visit(node)
 
 
-def basename(path: str):
+def basename(path: str) -> str:
     head, tail = ntpath.split(path)
     return tail or ntpath.basename(head)
 
 
 def normalize_path(path: str) -> str:
-    return path.replace('\\', '/')
+    if use_normalized_path:
+        return os.path.relpath(path).replace('\\', '/')
+    return path
 
 
 def get_results(c_filepath: str, features: list[str], out_dir_path: str,
                 print_enabled: bool = False) -> list[tuple[FNode, FNode]]:
-    out_c_filepath_prefix: str = os.path.join(
-        out_dir_path, remove_extension(basename(c_filepath)))
-    if wsl:
-        c_filepath = normalize_path(
-            os.path.relpath(c_filepath))
-        out_c_filepath_prefix = normalize_path(
-            os.path.relpath(out_c_filepath_prefix))
+    out_prefix: str = normalize_path(os.path.join(
+        out_dir_path, remove_extension(basename(c_filepath))))
 
-    assumes: list[c_ast.Node] = []
     featured_counter_examples: list[tuple[FNode, FNode]] = []
+
+    file_ast: c_ast.FileAST = parse_file(c_filepath)
+    main_func_def: Optional[c_ast.FuncDef] = get_func_def(file_ast, 'main')
+    if main_func_def is None:
+        print(f"Function 'main' is not defined in {c_filepath}")
+        exit(1)
+
+    function_names: set[str] = get_all_function_names(file_ast)
+    function_names.remove('main')
+
+    feature_adder: FeatureAdder = FeatureAdder(features, function_names)
+    feature_adder.visit(file_ast)
+
+    input_initializer: InputInitializer = InputInitializer()
+    input_initializer.visit(main_func_def.body)
+    inputs: list[str] = input_initializer.inputs
+
+    add_feature_decls(features, main_func_def.body)
 
     i: int = 0
     while True:
-        file_ast: c_ast.FileAST = parse_file(c_filepath)
-        main_func_def: Optional[c_ast.FuncDef] = get_func_def(file_ast, 'main')
+        out_c_filepath: str = f'{out_prefix}_{i}.c'
+        ll_filepath: str = f'{out_prefix}_{i}.ll'
+        smt2_filepath: str = f'{out_prefix}_{i}.smt2'
+        new_smt2_filepath: str = f'{out_prefix}_{i}_new.smt2'
+        log_filepath: str = f'{out_prefix}_{i}.log'
 
-        function_names: set[str] = get_all_function_names(file_ast)
-        function_names.remove('main')
-        feature_adder: FeatureAdder = FeatureAdder(features, function_names)
-        feature_adder.visit(file_ast)
-        input_initializer: InputInitializer = InputInitializer()
-        if main_func_def:
-            input_initializer.visit(main_func_def.body)
-        inputs: list[str] = input_initializer.inputs
-
-        add_feature_decls(features, main_func_def.body)
-        add_assumes(assumes, main_func_def.body)
-
-        out_c_filepath: str = f'{out_c_filepath_prefix}_{i}.c'
         with open(out_c_filepath, 'w+') as file:
             file.write(SEAHORN_INCLUDE + '\n' * 2 + generate_c_code(file_ast))
 
-        ll_filepath: str = replace_extension(out_c_filepath, '.ll')
         process: subprocess.CompletedProcess = run(
-            f'{seahorn_path} pf {out_c_filepath} --cex={ll_filepath}')
+            f'{seahorn_path} smt {out_c_filepath} --solve '
+            f'--horn-format=pure-smt2 -o {smt2_filepath} --oll={ll_filepath}')
 
         if not has_seahorn_returned_sat(process):
-            print("No more all counter examples.")
             break
 
-        smt2_filepath: str = generate_smt2_file(out_c_filepath)
-        new_smt2_filepath: str = generate_generalization_file(smt2_filepath)
-        log_filepath: str = generate_log_file(new_smt2_filepath)
+        generate_new_smt2_file(smt2_filepath, new_smt2_filepath)
+        generate_log_file(new_smt2_filepath, log_filepath)
         s_expr: str = get_precondition_in_s_expr(log_filepath)
 
-        mapping: dict[str, str] = get_p_init_variable_mapping(s_expr, features + inputs)
+        mapping: dict[str, str] = get_p_init_variable_mapping(
+            s_expr, features + inputs)
         formula: FNode = get_simplified_formula(s_expr, mapping.keys())
-        subs: dict[FNode, FNode] = get_subs(mapping)
-        formula = formula.substitute(subs)
+        formula = formula.substitute(get_subs(mapping))
 
         feature_formula: FNode
         input_formula: FNode
         feature_formula, input_formula = split_formula(formula, features)
         feature_c_ast: c_ast.Node = get_feature_c_ast(feature_formula)
-        assumes.append(c_func_call('assume', [c_neg(feature_c_ast)]))
+        add_assumes([c_assume(c_neg(feature_c_ast))], main_func_def.body)
         featured_counter_examples.append((feature_formula, input_formula))
 
         if print_enabled:
@@ -570,7 +562,7 @@ def main() -> None:
     namespace: argparse.Namespace = get_namespace()
     update_globals(namespace)
 
-    c_filepath: str = namespace.infile
+    c_filepath: str = namespace.path
     features: list[str] = namespace.features
 
     out_dir_path: str = namespace.out
@@ -580,6 +572,8 @@ def main() -> None:
     else:
         with tempfile.TemporaryDirectory() as out_dir_path:
             get_results(c_filepath, features, out_dir_path, True)
+
+    print("No more all counter examples.")
 
 
 if __name__ == '__main__':

@@ -29,7 +29,8 @@ def smt2_assert(expr: str) -> str:
 
 
 def smt2_forall(params: Iterable[tuple[str, str]], expr: str) -> str:
-    return f'({SMT2_FORALL} ({" ".join(f"({n} {t})" for n, t in params)}) {expr})'
+    return f'({SMT2_FORALL} ' \
+           f'({" ".join(f"({n} {t})" for n, t in params)}) {expr})'
 
 
 def smt2_implies(l_expr: str, r_expr: str) -> str:
