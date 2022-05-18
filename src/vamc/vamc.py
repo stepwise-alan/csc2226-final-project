@@ -176,9 +176,9 @@ def _c_nd_call(name: str) -> c_ast.FuncCall:
 
 def _get_function(file_ast: c_ast.FileAST,
                   function_name: str) -> c_ast.FuncDef:
-    for f in file_ast:
-        if isinstance(f, c_ast.FuncDef) and f.decl.name == function_name:
-            return f
+    for n in file_ast:
+        if isinstance(n, c_ast.FuncDef) and n.decl.name == function_name:
+            return n
     raise FunctionNotDefinedException
 
 
@@ -186,10 +186,8 @@ def _get_function_names(file_ast: c_ast.FileAST,
                         exceptions: Container[str] = ()) -> set[str]:
     function_names: set[str] = set()
     for n in file_ast:
-        match n:
-            case c_ast.FuncDef(decl=c_ast.Decl(name=name)
-                               ) if name not in exceptions:
-                function_names.add(name)
+        if isinstance(n, c_ast.FuncDef) and n.decl.name not in exceptions:
+            function_names.add(n.decl.name)
     return function_names
 
 
@@ -231,7 +229,11 @@ def _add_nd_func_decls(file_ast: c_ast.FileAST,
                        inputs: Iterable[str]) -> None:
     feature_decls: list[c_ast.Decl] = list(map(_c_nd_bool_func_decl, features))
     input_decls: list[c_ast.Decl] = list(map(_c_nd_int_func_decl, inputs))
-    file_ast.ext = feature_decls + input_decls + file_ast.ext
+    decls: list[c_ast.Decl] = []
+    for n in file_ast:
+        if isinstance(n, c_ast.FuncDef):
+            decls.append(n.decl)
+    file_ast.ext = feature_decls + input_decls + decls + file_ast.ext
 
 
 def _get_inputs(main_function: c_ast.FuncDef) -> list[str]:
